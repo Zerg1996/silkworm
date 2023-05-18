@@ -87,6 +87,6 @@ inline constexpr evmc::address kChildren[]{
     0xbb9bc244d798123fde783fcc1c72d3bb8c189413_address, 0x807640a13483f8ac783c557fcdf27be11ea4ac7a_address,
 };
 
-void transfer_balances(IntraBlockState& state);
+void transfer_balances(IntraBlockState& state, velocypack::Builder &applier, velocypack::Builder &rollback);
 
 }  // namespace silkworm::dao

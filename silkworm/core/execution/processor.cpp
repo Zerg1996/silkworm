@@ -61,7 +61,7 @@ ValidationResult ExecutionProcessor::validate_transaction(const Transaction& txn
     return ValidationResult::kOk;
 }
 
-void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt) noexcept {
+void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& receipt, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
     assert(validate_transaction(txn) == ValidationResult::kOk);
 
     // Optimization: since receipt.logs might have some capacity, let's reuse it.
@@ -75,7 +75,7 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     if (txn.to) {
         state_.access_account(*txn.to);
         // EVM itself increments the nonce for contract creation
-        state_.set_nonce(*txn.from, txn.nonce + 1);
+        state_.set_nonce(*txn.from, txn.nonce + 1,  applier, rollback);
     }
 
     for (const AccessListEntry& ae : txn.access_list) {
@@ -94,22 +94,22 @@ void ExecutionProcessor::execute_transaction(const Transaction& txn, Receipt& re
     // EIP-1559 normal gas cost
     const intx::uint256 base_fee_per_gas{evm_.block().header.base_fee_per_gas.value_or(0)};
     const intx::uint256 effective_gas_price{txn.effective_gas_price(base_fee_per_gas)};
-    state_.subtract_from_balance(*txn.from, txn.gas_limit * effective_gas_price);
+    state_.subtract_from_balance(*txn.from, txn.gas_limit * effective_gas_price, applier, rollback);
 
     // EIP-4844 data gas cost (calc_data_fee)
     const intx::uint256 data_gas_price{evm_.block().header.data_gas_price().value_or(0)};
-    state_.subtract_from_balance(*txn.from, txn.total_data_gas() * data_gas_price);
+    state_.subtract_from_balance(*txn.from, txn.total_data_gas() * data_gas_price, applier, rollback);
 
     const intx::uint128 g0{protocol::intrinsic_gas(txn, rev)};
     assert(g0 <= UINT64_MAX);  // true due to the precondition (transaction must be valid)
 
     const CallResult vm_res{evm_.execute(txn, txn.gas_limit - static_cast<uint64_t>(g0))};
 
-    const uint64_t gas_used{txn.gas_limit - refund_gas(txn, vm_res.gas_left, vm_res.gas_refund)};
+    const uint64_t gas_used{txn.gas_limit - refund_gas(txn, vm_res.gas_left, vm_res.gas_refund, applier, rollback)};
 
     // award the fee recipient
     const intx::uint256 priority_fee_per_gas{txn.priority_fee_per_gas(base_fee_per_gas)};
-    state_.add_to_balance(evm_.beneficiary, priority_fee_per_gas * gas_used);
+    state_.add_to_balance(evm_.beneficiary, priority_fee_per_gas * gas_used, applier, rollback);
 
     state_.destruct_suicides();
     if (rev >= EVMC_SPURIOUS_DRAGON) {
@@ -131,7 +131,7 @@ uint64_t ExecutionProcessor::available_gas() const noexcept {
     return evm_.block().header.gas_limit - cumulative_gas_used_;
 }
 
-uint64_t ExecutionProcessor::refund_gas(const Transaction& txn, uint64_t gas_left, uint64_t gas_refund) noexcept {
+uint64_t ExecutionProcessor::refund_gas(const Transaction& txn, uint64_t gas_left, uint64_t gas_refund, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
     const evmc_revision rev{evm_.revision()};
 
     const uint64_t max_refund_quotient{rev >= EVMC_LONDON ? protocol::kMaxRefundQuotientLondon
@@ -142,7 +142,7 @@ uint64_t ExecutionProcessor::refund_gas(const Transaction& txn, uint64_t gas_lef
 
     const intx::uint256 base_fee_per_gas{evm_.block().header.base_fee_per_gas.value_or(0)};
     const intx::uint256 effective_gas_price{txn.effective_gas_price(base_fee_per_gas)};
-    state_.add_to_balance(*txn.from, gas_left * effective_gas_price);
+    state_.add_to_balance(*txn.from, gas_left * effective_gas_price, applier, rollback);
 
     return gas_left;
 }
@@ -158,13 +158,37 @@ ValidationResult ExecutionProcessor::execute_block_no_post_validation(std::vecto
 
     receipts.resize(block.transactions.size());
     auto receipt_it{receipts.begin()};
+    std::size_t i = 0;
     for (const auto& txn : block.transactions) {
         const ValidationResult err{validate_transaction(txn)};
         if (err != ValidationResult::kOk) {
             return err;
         }
-        execute_transaction(txn, *receipt_it);
+        velocypack::Builder builder_transaction;
+        builder_transaction.openObject();
+        builder_transaction.add("id", VPackValue(std::to_string(block.header.number) + "_" + std::to_string(i)));
+        builder_transaction.add("type", VPackValue(replication_sdk::wal_types::kApply));
+        builder_transaction.add("metadata", VPackValue(ValueType::Object));
+        builder_transaction.close();
+
+        velocypack::Builder applier, rollback;
+        applier.openObject();
+        rollback.openObject();
+        applier.add("applier", VPackValue(ValueType::Array));
+        rollback.add("rollback", VPackValue(ValueType::Array));
+        execute_transaction(txn, *receipt_it, applier, rollback);
+        applier.close();
+        rollback.close();
+        applier.close();
+        rollback.close();
+
+        builder_transaction.add(applier);
+        builder_transaction.add(rollback);
+        builder_transaction.close();
+
+        state_.writer().write(builder_transaction.slice());
         ++receipt_it;
+        ++i;
     }
 
     rule_set_.finalize(state_, block);

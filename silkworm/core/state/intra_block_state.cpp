@@ -45,16 +45,47 @@ state::Object* IntraBlockState::get_object(const evmc::address& address) noexcep
     return const_cast<state::Object*>(self.get_object(address));
 }
 
-state::Object& IntraBlockState::get_or_create_object(const evmc::address& address) noexcept {
+state::Object& IntraBlockState::get_or_create_object(const evmc::address& address, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
     auto* obj{get_object(address)};
 
     if (obj == nullptr) {
         journal_.emplace_back(new state::CreateDelta{address});
         obj = &objects_[address];
         obj->current = Account{};
+        applier.add("kInsert", VPackValue(ValueType::Object));
+        applier.add("data", VPackValue(ValueType::Object));
+        applier.add("address", VPackValue(*obj));
+        applier.add("nonce", VPackValue(0));
+        applier.add("code_hash", VPackValue(kEmptyHash));
+        applier.add("incarnation", VPackValue(0));
+        applier.close();
+        applier.close();
+
+        rollback.add("kRemove", VPackValue(ValueType::Object));
+        rollback.add("key", VPackValue(ValueType::Object));
+        rollback.add("address", VPackValue(*obj));
+        rollback.close();
     } else if (obj->current == std::nullopt) {
         journal_.emplace_back(new state::UpdateDelta{address, *obj});
         obj->current = Account{};
+//TODO ZERG: understand it
+        applier.add("kUpdate", VPackValue(ValueType::Object));
+        applier.add("key", VPackValue(ValueType::Object));
+        applier.add("address", VPackValue(*obj));
+        applier.close();
+        applier.add("data", VPackValue(ValueType::Object));
+        applier.add("address", VPackValue(*obj));
+        applier.close();
+        applier.close();
+        
+        rollback.add("kUpdate", VPackValue(ValueType::Object));
+        rollback.add("key", VPackValue(ValueType::Object));
+        rollback.add("address", VPackValue(*obj));
+        rollback.close();
+        rollback.add("data", VPackValue(ValueType::Object));
+        rollback.add("address", VPackValue(*obj));
+        rollback.close();
+        rollback.close();
     }
 
     return *obj;
@@ -73,7 +104,7 @@ bool IntraBlockState::is_dead(const evmc::address& address) const noexcept {
     return obj->current->code_hash == kEmptyHash && obj->current->nonce == 0 && obj->current->balance == 0;
 }
 
-void IntraBlockState::create_contract(const evmc::address& address) noexcept {
+void IntraBlockState::create_contract(const evmc::address& address, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
     state::Object created{};
     created.current = Account{};
 
@@ -88,8 +119,23 @@ void IntraBlockState::create_contract(const evmc::address& address) noexcept {
             prev_incarnation = prev->initial->incarnation;
         }
         journal_.emplace_back(new state::UpdateDelta{address, *prev});
+
+        builder.add("kUpdate", VPackValue(ValueType::Object));
+        builder.add("key", VPackValue(ValueType::Object));
+        builder.add("address", VPackValue(*prev));
+        builder.close();
+        builder.add("data", VPackValue(ValueType::Object));
+        builder.add("address", VPackValue(*prev));
+        builder.close();
+        builder.close();
     } else {
         journal_.emplace_back(new state::CreateDelta{address});
+
+        builder.add("kInsert", VPackValue(ValueType::Object));
+        builder.add("data", VPackValue(ValueType::Object));
+        builder.add("address", VPackValue(address));
+        builder.close();
+        builder.close();
     }
 
     if (!prev_incarnation || prev_incarnation == 0) {
@@ -102,8 +148,18 @@ void IntraBlockState::create_contract(const evmc::address& address) noexcept {
 
     auto it{storage_.find(address)};
     if (it == storage_.end()) {
+        builder.add("kInsert", VPackValue(ValueType::Object));
+        builder.add("data", VPackValue(ValueType::Object));
+        builder.add("address", VPackValue(address));
+        builder.close();
+        builder.close();
         journal_.emplace_back(new state::StorageCreateDelta{address});
     } else {
+        builder.add("kRemove", VPackValue(ValueType::Object));
+        builder.add("data", VPackValue(ValueType::Object));
+        builder.add("address", VPackValue(address));
+        builder.close();
+        builder.close();
         journal_.emplace_back(new state::StorageWipeDelta{address, it->second});
         storage_.erase(address);
     }
@@ -157,22 +213,79 @@ intx::uint256 IntraBlockState::get_balance(const evmc::address& address) const n
     return obj && obj->current ? obj->current->balance : 0;
 }
 
-void IntraBlockState::set_balance(const evmc::address& address, const intx::uint256& value) noexcept {
-    auto& obj{get_or_create_object(address)};
+void IntraBlockState::set_balance(const evmc::address& address, const intx::uint256& value, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
+    auto& obj{get_or_create_object(address, velocypack::Builder &builder)};
+
+    applier.add("kUpdate", VPackValue(ValueType::Object));
+    applier.add("key", VPackValue(ValueType::Object));
+    applier.add("address", VPackValue(*prev));
+    applier.close();
+    applier.add("data", VPackValue(ValueType::Object));
+    applier.add("balance", VPackValue(value));
+    applier.close();
+    applier.close();
+
+    rollback.add("kUpdate", VPackValue(ValueType::Object));
+    rollback.add("key", VPackValue(ValueType::Object));
+    rollback.add("address", VPackValue(*prev));
+    rollback.close();
+    rollback.add("data", VPackValue(ValueType::Object));
+    rollback.add("balance", VPackValue(obj.current->balance));
+    rollback.close();
+    rollback.close();
+
     journal_.emplace_back(new state::UpdateBalanceDelta{address, obj.current->balance});
     obj.current->balance = value;
     touch(address);
 }
 
-void IntraBlockState::add_to_balance(const evmc::address& address, const intx::uint256& addend) noexcept {
-    auto& obj{get_or_create_object(address)};
+void IntraBlockState::add_to_balance(const evmc::address& address, const intx::uint256& addend, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
+    auto& obj{get_or_create_object(address, velocypack::Builder &builder)};
+
+    applier.add("kUpdate", VPackValue(ValueType::Object));
+    applier.add("key", VPackValue(ValueType::Object));
+    applier.add("address", VPackValue(*prev));
+    applier.close();
+    applier.add("data", VPackValue(ValueType::Object));
+    applier.add("balance", VPackValue(obj.current->balance + addend));
+    applier.close();
+    applier.close();
+
+    rollback.add("kUpdate", VPackValue(ValueType::Object));
+    rollback.add("key", VPackValue(ValueType::Object));
+    rollback.add("address", VPackValue(*prev));
+    rollback.close();
+    rollback.add("data", VPackValue(ValueType::Object));
+    rollback.add("balance", VPackValue(obj.current->balance));
+    rollback.close();
+    rollback.close();
+
     journal_.emplace_back(new state::UpdateBalanceDelta{address, obj.current->balance});
     obj.current->balance += addend;
     touch(address);
 }
 
-void IntraBlockState::subtract_from_balance(const evmc::address& address, const intx::uint256& subtrahend) noexcept {
-    auto& obj{get_or_create_object(address)};
+void IntraBlockState::subtract_from_balance(const evmc::address& address, const intx::uint256& subtrahend, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
+    auto& obj{get_or_create_object(address, velocypack::Builder &builder)};
+
+    applier.add("kUpdate", VPackValue(ValueType::Object));
+    applier.add("key", VPackValue(ValueType::Object));
+    applier.add("address", VPackValue(*prev));
+    applier.close();
+    applier.add("data", VPackValue(ValueType::Object));
+    applier.add("balance", VPackValue(obj.current->balance - subtrahend));
+    applier.close();
+    applier.close();
+
+    rollback.add("kUpdate", VPackValue(ValueType::Object));
+    rollback.add("key", VPackValue(ValueType::Object));
+    rollback.add("address", VPackValue(*prev));
+    rollback.close();
+    rollback.add("data", VPackValue(ValueType::Object));
+    rollback.add("balance", VPackValue(obj.current->balance));
+    rollback.close();
+    rollback.close();
+
     journal_.emplace_back(new state::UpdateBalanceDelta{address, obj.current->balance});
     obj.current->balance -= subtrahend;
     touch(address);
@@ -183,8 +296,27 @@ uint64_t IntraBlockState::get_nonce(const evmc::address& address) const noexcept
     return obj && obj->current ? obj->current->nonce : 0;
 }
 
-void IntraBlockState::set_nonce(const evmc::address& address, uint64_t nonce) noexcept {
-    auto& obj{get_or_create_object(address)};
+void IntraBlockState::set_nonce(const evmc::address& address, uint64_t nonce, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept {
+    auto& obj{get_or_create_object(address, builder)};
+    
+    applier.add("kUpdate", VPackValue(ValueType::Object));
+    applier.add("key", VPackValue(ValueType::Object));
+    applier.add("address", VPackValue(*prev));
+    applier.close();
+    applier.add("data", VPackValue(ValueType::Object));
+    applier.add("nonce", VPackValue(nonce));
+    applier.close();
+    applier.close();
+    
+    rollback.add("kUpdate", VPackValue(ValueType::Object));
+    rollback.add("key", VPackValue(ValueType::Object));
+    rollback.add("address", VPackValue(*prev));
+    rollback.close();
+    rollback.add("data", VPackValue(ValueType::Object));
+    rollback.add("nonce", VPackValue(obj.current->nonce));
+    rollback.close();
+    rollback.close();
+    
     journal_.emplace_back(new state::UpdateDelta{address, obj});
     obj.current->nonce = nonce;
 }
@@ -220,7 +352,7 @@ evmc::bytes32 IntraBlockState::get_code_hash(const evmc::address& address) const
 }
 
 void IntraBlockState::set_code(const evmc::address& address, ByteView code) noexcept {
-    auto& obj{get_or_create_object(address)};
+    auto& obj{get_or_create_object(address, velocypack::Builder &builder)};
     journal_.emplace_back(new state::UpdateDelta{address, obj});
     obj.current->code_hash = bit_cast<evmc_bytes32>(keccak256(code));
 
@@ -301,6 +433,9 @@ void IntraBlockState::set_storage(const evmc::address& address, const evmc::byte
 }
 
 void IntraBlockState::write_to_db(uint64_t block_number) {
+//  We don't need to change this code and have function at all, because
+//  we already write all needed WALs to our DB, so applier will apply them
+
     db_.begin_block(block_number);
 
     for (const auto& [address, storage] : storage_) {
@@ -348,6 +483,26 @@ void IntraBlockState::revert_to_snapshot(const IntraBlockState::Snapshot& snapsh
     }
     journal_.resize(snapshot.journal_size_);
     logs_.resize(snapshot.log_size_);
+
+//  TODO: set up unique_number for this rollback transaction and send to method all revert_ids
+    velocypack::Builder builder_rollback;
+    builder_rollback.openObject();
+    builder_rollback.add("id", VPackValue(std::to_string(unique_number) + "_rollback"));
+    builder_rollback.add("type", VPackValue(replication_sdk::wal_types::kRollback));
+    builder_rollback.add("metadata", VPackValue(ValueType::Object)));
+    builder_rollback.add("id", VPackValue(ValueType::Array)));
+
+    for (auto& revert_id : revert_ids) {
+        builder_rollback.add(std::to_string(revert_id));
+    }
+    builder_rollback.close();
+    builder_rollback.close();
+
+    builder_rollback.add(applier);
+    builder_rollback.add(rollback);
+    builder_rollback.close();
+
+    writer().write(builder_rollback.slice());
 }
 
 void IntraBlockState::finalize_transaction() {
