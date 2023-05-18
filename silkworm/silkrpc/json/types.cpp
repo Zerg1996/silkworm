@@ -660,4 +660,87 @@ void make_glaze_json_error(std::string& reply, uint32_t id, const RevertError& e
     glz::write_json(glaze_json_revert, reply);
 }
 
+velocypack::Builder to_builder(const Block& b) {
+    velocypack::Builder builder;
+    builder.openObject();
+    const auto block_number = to_quantity(b.block.header.number);
+    builder.add("number", VPackValue(block_number));
+    builder.add("hash", VPackValue(b.hash));
+    builder.add("parentHash", VPackValue(b.block.header.parent_hash));
+    builder.add("nonce", VPackValue("0x" + silkworm::to_hex({b.block.header.nonce.data(), b.block.header.nonce.size()})));
+    builder.add("sha3Uncles", VPackValue(b.block.header.ommers_hash));
+    builder.add("logsBloom", VPackValue("0x" + silkworm::to_hex(full_view(b.block.header.logs_bloom))));
+    builder.add("transactionsRoot", VPackValue(b.block.header.transactions_root));
+    builder.add("stateRoot", VPackValue(b.block.header.state_root));
+    builder.add("receiptsRoot", VPackValue(b.block.header.receipts_root));
+    builder.add("miner", VPackValue(b.block.header.beneficiary));
+    builder.add("difficulty", VPackValue(to_quantity(silkworm::endian::to_big_compact(b.block.header.difficulty))));
+    builder.add("totalDifficulty", VPackValue(to_quantity(silkworm::endian::to_big_compact(b.total_difficulty))));
+    builder.add("extraData", VPackValue("0x" + silkworm::to_hex(b.block.header.extra_data)));
+    builder.add("mixHash", VPackValue(b.block.header.prev_randao));
+    builder.add("size", VPackValue(to_quantity(b.get_block_size())));
+    builder.add("gasLimit", VPackValue(to_quantity(b.block.header.gas_limit)));
+    builder.add("gasUsed", VPackValue(to_quantity(b.block.header.gas_used)));
+    if (b.block.header.base_fee_per_gas.has_value()) {
+        builder.add("baseFeePerGas", VPackValue(to_quantity(b.block.header.base_fee_per_gas.value_or(0))));
+    }
+    builder.add("timestamp", to_quantity(b.block.header.timestamp));
+    if (b.full_tx) {
+        builder.add(VPackValue(ValueType::Object));
+        for (std::size_t i{0}; i < b.block.transactions.size(); i++) {
+            builder.add("transactionIndex", VPackValue(to_quantity(i)));
+            builder.add("blockHash", VPackValue(b.hash));
+            builder.add("blockNumber", VPackValue(block_number));
+            builder.add("gasPrice", VPackValue(to_quantity(b.block.transactions[i].effective_gas_price(b.block.header.base_fee_per_gas.value_or(0)))));
+        }
+        builder.close();
+        builder.close();
+    }
+    std::vector<evmc::bytes32> ommer_hashes;
+    ommer_hashes.reserve(b.block.ommers.size());
+    for (std::size_t i{0}; i < b.block.ommers.size(); i++) {
+        ommer_hashes.emplace(ommer_hashes.end(), b.block.ommers[i].hash());
+    }
+    builder.add("uncles", VPackValue(ommer_hashes));
+    builder.close();
+    return builder;
+}
+
+Block from_builder(const velocypack::Builder &builder) {
+    Block b;
+    b.block.header.number = from_quantity(builder.get("number").getUInt64());
+    b.hash = builder.get("hash").getString();
+    b.block.header.parent_hash = builder.get("parentHash").getString();
+    b.block.header.nonce = silkworm::from_hex(builder.get("nonce").getString().substr(2));
+    b.block.header.ommers_hash = builder.get("sha3Uncles").getString();
+    b.block.header.logs_bloom = silkworm::from_hex(builder.get("logsBloom").getString().substr(2));
+    b.block.header.transactions_root = builder.get("transactionsRoot").getString();
+    b.block.header.state_root = builder.get("stateRoot").getString();
+    b.block.header.receipts_root = builder.get("receiptsRoot").getString();
+    b.block.header.beneficiary = builder.get("miner").getString();
+    b.block.header.difficulty = silkworm::endian::from_big_compact(from_quantity(builder.get("difficulty").getUInt64()));
+    b.total_difficulty = silkworm::endian::from_big_compact(from_quantity(builder.get("totalDifficulty").getUInt64()));
+    b.block.header.extra_data = silkworm::from_hex(builder.get("extraData").getString().substr(2));
+    b.block.header.prev_randao = builder.get("mixHash").getString();
+    b.block.header.gas_limit = from_quantity(builder.get("gasLimit").getUInt64());
+    b.block.header.gas_used = from_quantity(builder.get("gasUsed").getUInt64());
+    if (builder.get("baseFeePerGas").isUInt64()) {
+            b.block.header.base_fee_per_gas = from_quantity(builder.get("baseFeePerGas").getUInt64());
+    }
+    b.block.header.timestamp = from_quantity(builder.get("timestamp").getUInt64());
+    if (builder.get("transactions").isArray()) {
+        const auto &txs = builder.get("transactions");
+        for (std::size_t i{0}; i < txs.getLength(); i++) {
+            b.block.transactions.emplace_back(from_builder(txs.get(i)));
+        }
+    }
+    if (builder.get("uncles").isArray()) {
+        const auto &uncles = builder.get("uncles");
+        for (std::size_t i{0}; i < uncles.getLength(); i++) {
+            b.block.ommers.emplace_back(from_builder(uncles.get(i)));
+        }
+    }
+    return b;
+}
+
 }  // namespace silkworm::rpc

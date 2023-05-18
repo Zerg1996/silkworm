@@ -18,10 +18,10 @@
 
 namespace silkworm::dao {
 
-void transfer_balances(IntraBlockState& state) {
+void transfer_balances(IntraBlockState& state, velocypack::Builder &applier, velocypack::Builder &rollback) {
     for (const evmc::address& address : kChildren) {
-        state.add_to_balance(kWithdraw, state.get_balance(address));
-        state.set_balance(address, 0);
+        state.add_to_balance(kWithdraw, state.get_balance(address), applier, rollback);
+        state.set_balance(address, 0, applier, rollback);
     }
 }
 }  // namespace silkworm::dao

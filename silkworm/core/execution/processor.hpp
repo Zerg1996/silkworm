@@ -46,7 +46,7 @@ class ExecutionProcessor {
      * Execute a transaction, but do not write to the DB yet.
      * Precondition: transaction must be valid.
      */
-    void execute_transaction(const Transaction& txn, Receipt& receipt) noexcept;
+    void execute_transaction(const Transaction& txn, Receipt& receipt, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept;
 
     //! \brief Execute the block and write the result to the DB.
     //! \remarks Warning: This method does not verify state root; pre-Byzantium receipt root isn't validated either.
@@ -67,7 +67,7 @@ class ExecutionProcessor {
     [[nodiscard]] ValidationResult execute_block_no_post_validation(std::vector<Receipt>& receipts) noexcept;
 
     uint64_t available_gas() const noexcept;
-    uint64_t refund_gas(const Transaction& txn, uint64_t gas_left, uint64_t refund_gas) noexcept;
+    uint64_t refund_gas(const Transaction& txn, uint64_t gas_left, uint64_t refund_gas, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept;
 
     uint64_t cumulative_gas_used_{0};
     IntraBlockState state_;

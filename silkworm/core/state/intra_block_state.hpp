@@ -60,7 +60,7 @@ class IntraBlockState {
     // See EIP-161: State trie clearing (invariant-preserving alternative)
     bool is_dead(const evmc::address& address) const noexcept;
 
-    void create_contract(const evmc::address& address) noexcept;
+    void create_contract(const evmc::address& address, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept;
 
     void destruct(const evmc::address& address);
 
@@ -71,9 +71,9 @@ class IntraBlockState {
     size_t number_of_self_destructs() const noexcept { return self_destructs_.size(); }
 
     intx::uint256 get_balance(const evmc::address& address) const noexcept;
-    void set_balance(const evmc::address& address, const intx::uint256& value) noexcept;
-    void add_to_balance(const evmc::address& address, const intx::uint256& addend) noexcept;
-    void subtract_from_balance(const evmc::address& address, const intx::uint256& subtrahend) noexcept;
+    void set_balance(const evmc::address& address, const intx::uint256& value, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept;
+    void add_to_balance(const evmc::address& address, const intx::uint256& addend, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept;
+    void subtract_from_balance(const evmc::address& address, const intx::uint256& subtrahend, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept;
 
     void touch(const evmc::address& address) noexcept;
 
@@ -129,8 +129,10 @@ class IntraBlockState {
     const state::Object* get_object(const evmc::address& address) const noexcept;
     state::Object* get_object(const evmc::address& address) noexcept;
 
-    state::Object& get_or_create_object(const evmc::address& address) noexcept;
+    state::Object& get_or_create_object(const evmc::address& address, velocypack::Builder &applier, velocypack::Builder &rollback) noexcept;
 
+    replication_sdk::writer writer;
+    replication_sdk::writer reader;
     State& db_;
 
     mutable FlatHashMap<evmc::address, state::Object> objects_;

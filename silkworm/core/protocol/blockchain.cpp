@@ -95,9 +95,49 @@ ValidationResult Blockchain::execute_block(const Block& block, bool check_state_
     processor.evm().state_pool = state_pool;
     processor.evm().exo_evm = exo_evm;
 
+    velocypack::Builder builder_metadata;
+    builder_metadata.openObject();
+    builder_metadata.add("id", VPackValue(std::to_string(block.header.number)));
+    builder_metadata.add("type", VPackValue(replication_sdk::wal_types::kApply));
+    builder_metadata.add("metadata", to_builder(block, builder));
+
+    velocypack::Builder applier, rollback;
+    applier.openObject();
+    rollback.openObject();
+    applier.add("applier", VPackValue(ValueType::Array));
+    rollback.add("rollback", VPackValue(ValueType::Array));
+    applier.close();
+    rollback.close();
+    applier.close();
+    rollback.close();
+
+    builder_metadata.add(applier);
+    builder_metadata.add(rollback);
+    builder_metadata.close();
+
+    state_.writer().write(builder_metadata.slice());
+
     if (const auto res{processor.execute_and_write_block(receipts_)}; res != ValidationResult::kOk) {
         return res;
     }
+
+    velocypack::Builder builder_commit;
+    builder_commit.openObject();
+    builder_commit.add("id", VPackValue(std::to_string(block.header.number) + "_commit"));
+    builder_commit.add("type", VPackValue(replication_sdk::wal_types::kCommit));
+    builder_commit.add("metadata", VPackValue(ValueType::Object)));
+    builder_commit.add("id", VPackValue(ValueType::Array)));
+    for (std::size_t i = 0; i < receipts_.size(); i++) {
+        builder_commit.add(std::to_string(block.header.number) + "_" + std::to_string(i));
+    }
+    builder_commit.close();
+    builder_commit.close();
+
+    builder_commit.add(applier);
+    builder_commit.add(rollback);
+    builder_commit.close();
+
+    state_.writer().write(builder_commit.slice());
 
     if (check_state_root) {
         evmc::bytes32 state_root{state_.state_root_hash()};
@@ -140,6 +180,36 @@ void Blockchain::unwind_last_changes(uint64_t ancestor, uint64_t tip) {
     SILKWORM_ASSERT(ancestor <= tip);
     for (uint64_t block_number{tip}; block_number > ancestor; --block_number) {
         state_.unwind_state_changes(block_number);
+
+        velocypack::Builder builder_rollback;
+        builder_rollback.openObject();
+        builder_rollback.add("id", VPackValue(std::to_string(block_number) + "_rollback"));
+        builder_rollback.add("type", VPackValue(replication_sdk::wal_types::kRollback));
+        builder_rollback.add("metadata", VPackValue(ValueType::Object)));
+        builder_rollback.add("id", VPackValue(ValueType::Array)));
+
+        std::size_t i = 0;
+        while (true) {
+            velocypack::Builder searcher;
+            searcher.openObject();
+            searcher.add("id", VPackValue(std::to_string(block_number) + "_" + std::to_string(i)));
+            searcher.close();
+            ++i;
+            if (state_.reader().exist(searcher.slice())) {
+                break;
+            } else {
+                builder_rollback.add(std::to_string(block.header.number) + "_" + std::to_string(i));
+            }
+        }
+
+        builder_rollback.close();
+        builder_rollback.close();
+
+        builder_rollback.add(applier);
+        builder_rollback.add(rollback);
+        builder_rollback.close();
+
+        state_.writer().write(builder_rollback.slice());
     }
 }
 

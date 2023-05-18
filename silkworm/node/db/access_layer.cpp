@@ -337,6 +337,13 @@ void read_transactions(ROCursor& txn_table, uint64_t base_id, uint64_t count, st
 }
 
 bool read_block_by_number(ROTxn& txn, BlockNum number, bool read_senders, Block& block) {
+    velocypack::Builder searcher, result;
+    searcher.openObject();
+    searcher.add("id", VPackValue(std::to_string(number));
+    searcher.close();
+    state_.reader().find(searcher.slice(), result);
+    Block block_result = from_builder(result);
+
     PooledCursor canonical_hashes_cursor(txn, table::kCanonicalHashes);
     const Bytes key{block_key(number)};
     const auto data{canonical_hashes_cursor.find(to_slice(key), false)};
